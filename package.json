@@ -1,0 +1,13 @@
+{
+  "name": "pulse-stock-server",
+  "version": "3.0.0",
+  "description": "Real-time stock news & breakout alerts via Finviz/Yahoo Finance, with Gmail email notifications",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT"
+}
