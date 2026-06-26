@@ -1,0 +1,1374 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PULSE — Stock Intelligence</title>
+
+<!-- PWA: מאפשר התקנה כאייקון על מסך הבית בטלפון -->
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#080808">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PULSE">
+<link rel="apple-touch-icon" href="./icon-192.png">
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#080808;}
+  #root{min-height:100vh;}
+</style>
+</head>
+<body>
+
+<!--
+  ============================================================================
+  PULSE — Stock Intelligence (PWA)
+  ============================================================================
+  קובץ זה הוא ה-frontend. כדי שהאפליקציה תעבוד מכל מקום (לא רק מהמחשב שלך),
+  הוא צריך להיות מוגש מאתר (לא קובץ מקומי) ולהתחבר לשרת PULSE שרץ בענן.
+
+  פריסה (פעם אחת):
+  -----------------
+  1. פרוס את server.js + package.json ל-Render (או שירות דומה) כ-Web Service.
+  2. קבל כתובת ציבורית, לדוגמה: https://pulse-server-xxxx.onrender.com
+  3. עדכן את הקבוע PROXY בתוך קוד ה-JSX למטה לכתובת הזו.
+  4. העלה את כל התיקייה (pulse-app.html, manifest.json, service-worker.js,
+     icon-192.png, icon-512.png) לאתר סטטי (Render Static Site / GitHub Pages /
+     Netlify / Vercel — כולם בעלי free tier).
+  5. פתח את הכתובת בטלפון (Safari ב-iOS, Chrome ב-Android) ובחר
+     "הוסף למסך הבית" / "Add to Home Screen" — האפליקציה תתקין כאייקון.
+
+  להרצה מקומית לבדיקה בלבד (לא לשימוש קבוע מהטלפון):
+  ----------------------------------------------------
+  node server.js   (משתמש ב-localhost:3001 כברירת מחדל)
+  ============================================================================
+-->
+
+<div id="root">
+  <div style="display:flex;align-items:center;justify-content:center;min-height:100vh;color:#444;font-family:monospace;font-size:13px;">
+    טוען PULSE...
+  </div>
+</div>
+
+<script type="text/babel" data-presets="react">
+
+// כתובת שרת PULSE בענן (Render)
+const PROXY = "https://pulse-server-el69.onrender.com";
+const POPULAR = ["AAPL","NVDA","TSLA","MSFT","AMZN","META","GOOGL","SPY"];
+const NAMES = {AAPL:"Apple",NVDA:"NVIDIA",TSLA:"Tesla",MSFT:"Microsoft",AMZN:"Amazon",META:"Meta",GOOGL:"Alphabet",SPY:"S&P 500"};
+
+const INTERVALS = [
+  { label:"1m",  interval:"1m",  range:"1d",   desc:"תוך-יומי 1 דקה" },
+  { label:"5m",  interval:"5m",  range:"5d",   desc:"תוך-יומי 5 דקות" },
+  { label:"1D",  interval:"1d",  range:"3mo",  desc:"יומי 3 חודשים" },
+  { label:"6M",  interval:"1d",  range:"6mo",  desc:"יומי 6 חודשים" },
+  { label:"1Y",  interval:"1d",  range:"1y",   desc:"יומי שנה" },
+];
+
+const MA_COLORS = ["#e8ff47","#00b4ff","#ff6b6b","#a066ff","#00d4aa"];
+
+// ─── CANDLESTICK CHART (pure SVG/Canvas) ──────────────────────────────────────
+function CandleChart({ candles, mas, maPeriods, height = 340 }) {
+  const containerRef = React.useRef(null);
+  const canvasRef    = React.useRef(null);
+  const [tooltip, setTooltip] = React.useState(null);
+  const [width, setWidth] = React.useState(800);
+
+  React.useEffect(() => {
+    if (!containerRef.current) return;
+    const ro = new ResizeObserver(e => setWidth(e[0].contentRect.width));
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  React.useEffect(() => {
+    if (!canvasRef.current || !candles || candles.length === 0) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = width  * dpr;
+    canvas.height = height * dpr;
+    ctx.scale(dpr, dpr);
+
+    const PAD = { top: 16, right: 16, bottom: 36, left: 62 };
+    const W = width  - PAD.left - PAD.right;
+    const H = height - PAD.top  - PAD.bottom;
+
+    ctx.clearRect(0, 0, width, height);
+
+    // Visible window — show last 120 candles max for readability
+    const visible = candles.slice(-Math.min(candles.length, 160));
+    const allPrices = visible.flatMap(c => [c.h, c.l]);
+    let yMin = Math.min(...allPrices);
+    let yMax = Math.max(...allPrices);
+
+    // Include MA values in y range
+    for (const p of maPeriods) {
+      const arr = mas[p];
+      if (!arr) continue;
+      const startIdx = candles.length - visible.length;
+      const slice = arr.slice(startIdx).filter(v => v != null);
+      if (slice.length) {
+        yMin = Math.min(yMin, ...slice);
+        yMax = Math.max(yMax, ...slice);
+      }
+    }
+
+    const pad = (yMax - yMin) * 0.04;
+    yMin -= pad; yMax += pad;
+
+    const xScale = i => PAD.left + (i / (visible.length - 1)) * W;
+    const yScale = v => PAD.top  + H - ((v - yMin) / (yMax - yMin)) * H;
+
+    // Grid lines
+    ctx.strokeStyle = "rgba(255,255,255,0.04)";
+    ctx.lineWidth = 1;
+    const yTicks = 6;
+    for (let i = 0; i <= yTicks; i++) {
+      const y = PAD.top + (H / yTicks) * i;
+      ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + W, y); ctx.stroke();
+      const val = yMax - ((yMax - yMin) / yTicks) * i;
+      ctx.fillStyle = "#333";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText("$" + val.toFixed(2), PAD.left - 6, y + 3);
+    }
+
+    // X axis labels
+    const labelStep = Math.max(1, Math.floor(visible.length / 6));
+    ctx.fillStyle = "#333";
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    visible.forEach((c, i) => {
+      if (i % labelStep !== 0) return;
+      const d = new Date(c.t);
+      const lbl = c.t > Date.now() - 2 * 86400000
+        ? d.toLocaleTimeString("en-US", { hour:"2-digit", minute:"2-digit", hour12:false })
+        : d.toLocaleDateString("en-US", { month:"short", day:"numeric" });
+      ctx.fillText(lbl, xScale(i), height - 10);
+    });
+
+    // Candles
+    const candleW = Math.max(1, Math.min(12, W / visible.length - 1));
+    visible.forEach((c, i) => {
+      const x  = xScale(i);
+      const o  = yScale(c.o), cl = yScale(c.c);
+      const hi = yScale(c.h), lo = yScale(c.l);
+      const isGreen = c.c >= c.o;
+      const color = isGreen ? "#00c864" : "#ff4444";
+
+      // Wick
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, hi);
+      ctx.lineTo(x, lo);
+      ctx.stroke();
+
+      // Body
+      const bodyTop = Math.min(o, cl);
+      const bodyH   = Math.max(1, Math.abs(o - cl));
+      ctx.fillStyle = isGreen ? "#00c864" : "#ff4444";
+      if (bodyH < 2) {
+        ctx.fillStyle = color;
+        ctx.fillRect(x - candleW / 2, bodyTop - 0.5, candleW, 1.5);
+      } else {
+        ctx.fillRect(x - candleW / 2, bodyTop, candleW, bodyH);
+      }
+    });
+
+    // MA lines
+    const startIdx = candles.length - visible.length;
+    maPeriods.forEach((p, pi) => {
+      const arr = mas[p];
+      if (!arr) return;
+      const slice = arr.slice(startIdx);
+      ctx.strokeStyle = MA_COLORS[pi % MA_COLORS.length];
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let first = true;
+      slice.forEach((v, i) => {
+        if (v == null) return;
+        const x = xScale(i), y = yScale(v);
+        if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+
+    // Store for tooltip
+    canvas._visible = visible;
+    canvas._xScale  = xScale;
+    canvas._yScale  = yScale;
+    canvas._PAD     = PAD;
+    canvas._W       = W;
+    canvas._mas     = mas;
+    canvas._maPeriods = maPeriods;
+    canvas._startIdx  = startIdx;
+  }, [candles, mas, maPeriods, width, height]);
+
+  function onMouseMove(e) {
+    const canvas = canvasRef.current;
+    if (!canvas || !canvas._visible) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const { _visible, _xScale, _PAD, _W, _mas, _maPeriods, _startIdx } = canvas;
+    if (mx < _PAD.left || mx > _PAD.left + _W) { setTooltip(null); return; }
+    const idx = Math.round(((mx - _PAD.left) / _W) * (_visible.length - 1));
+    const c = _visible[Math.max(0, Math.min(idx, _visible.length - 1))];
+    if (!c) return;
+    const maVals = {};
+    for (const p of _maPeriods) {
+      const arr = _mas[p];
+      if (arr) maVals[p] = arr[_startIdx + idx];
+    }
+    setTooltip({ c, idx: Math.max(0, Math.min(idx, _visible.length - 1)), maVals, mx });
+  }
+
+  return (
+    <div ref={containerRef} style={{ position:"relative", width:"100%" }}>
+      <canvas ref={canvasRef} style={{ width:"100%", height, display:"block", cursor:"crosshair" }}
+        onMouseMove={onMouseMove} onMouseLeave={() => setTooltip(null)} />
+      {tooltip && (
+        <div style={{
+          position:"absolute",
+          left: Math.min(tooltip.mx + 10, width - 180),
+          top: 10,
+          background:"rgba(10,10,10,0.95)",
+          border:"1px solid rgba(255,255,255,0.1)",
+          borderRadius:8,
+          padding:"10px 14px",
+          fontSize:11,
+          fontFamily:"monospace",
+          pointerEvents:"none",
+          zIndex:10,
+          minWidth:160,
+        }}>
+          <div style={{ color:"#555", marginBottom:6 }}>
+            {new Date(tooltip.c.t).toLocaleString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}
+          </div>
+          {[["O",tooltip.c.o],["H",tooltip.c.h],["L",tooltip.c.l],["C",tooltip.c.c]].map(([k,v])=>(
+            <div key={k} style={{ display:"flex", justifyContent:"space-between", gap:16, color: k==="C" ? (tooltip.c.c >= tooltip.c.o ? "#00c864":"#ff4444") : "#aaa" }}>
+              <span>{k}</span><span>${v?.toFixed(2)}</span>
+            </div>
+          ))}
+          {Object.entries(tooltip.maVals).map(([p,v],i) => v != null && (
+            <div key={p} style={{ display:"flex", justifyContent:"space-between", gap:16, color: MA_COLORS[i % MA_COLORS.length], marginTop:2 }}>
+              <span>MA{p}</span><span>${v?.toFixed(2)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MA LEGEND ────────────────────────────────────────────────────────────────
+function MALegend({ maPeriods, maStack }) {
+  if (!maPeriods.length) return null;
+  const stackOk = maStack?.bullish || maStack?.bearish;
+  return (
+    <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginTop:8 }}>
+      {maPeriods.map((p,i) => (
+        <span key={p} style={{ display:"inline-flex", alignItems:"center", gap:5, fontSize:11, fontFamily:"monospace" }}>
+          <span style={{ width:20, height:2, background:MA_COLORS[i % MA_COLORS.length], display:"inline-block", borderRadius:1 }}/>
+          <span style={{ color:MA_COLORS[i % MA_COLORS.length] }}>MA{p}</span>
+          {maStack?.values?.[p] && <span style={{ color:"#444" }}>${maStack.values[p].toFixed(2)}</span>}
+        </span>
+      ))}
+      {stackOk && (
+        <span style={{
+          marginLeft:8, fontSize:11, fontWeight:800, padding:"2px 10px", borderRadius:20,
+          background: maStack.bullish ? "rgba(0,200,100,0.15)" : "rgba(255,60,60,0.15)",
+          color: maStack.bullish ? "#00c864" : "#ff4444",
+          letterSpacing:"0.06em",
+        }}>
+          {maStack.bullish ? "▲ MA STACK BULL" : "▼ MA STACK BEAR"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ─── SENTIMENT ────────────────────────────────────────────────────────────────
+function sentimentLabel(s) {
+  if (s==="bullish")  return { text:"▲ Bullish",   color:"#00c864", bg:"rgba(0,200,100,0.1)" };
+  if (s==="bearish")  return { text:"▼ Bearish",   color:"#ff4444", bg:"rgba(255,60,60,0.1)" };
+  if (s==="weakBull") return { text:"↑ Mild Bull", color:"#7ecba1", bg:"rgba(0,200,100,0.06)" };
+  if (s==="weakBear") return { text:"↓ Mild Bear", color:"#e07070", bg:"rgba(255,60,60,0.06)" };
+  return { text:"— Neutral", color:"#444", bg:"rgba(255,255,255,0.04)" };
+}
+
+function SourceBadge({ provider }) {
+  const isF = provider === "finviz";
+  return <span style={{ fontSize:10, fontWeight:800, padding:"2px 6px", borderRadius:3, background:isF?"rgba(0,180,255,0.12)":"rgba(130,80,255,0.12)", color:isF?"#00b4ff":"#a066ff", fontFamily:"monospace" }}>{isF?"FV":"YF"}</span>;
+}
+
+function NewsCard({ item, index, showTicker }) {
+  const [open, setOpen] = React.useState(false);
+  const s = sentimentLabel(item.sentiment);
+  const isStrong = item.sentiment === "bullish" || item.sentiment === "bearish";
+  return (
+    <div onClick={()=>setOpen(!open)} style={{ background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:9, padding:"13px 15px", cursor:"pointer", position:"relative" }}>
+      <div style={{ display:"flex", gap:7, marginBottom:7, flexWrap:"wrap", alignItems:"center" }}>
+        {showTicker && item.ticker && <span style={{ fontSize:10, fontWeight:800, padding:"2px 8px", borderRadius:4, background:"rgba(232,255,71,0.1)", color:"#e8ff47", fontFamily:"monospace", letterSpacing:"0.04em" }}>{item.ticker}</span>}
+        {index===0 && !showTicker && <span style={{ display:"inline-flex", alignItems:"center", gap:4, background:"#e8ff47", color:"#0a0a0a", fontSize:9, fontWeight:800, letterSpacing:"0.14em", padding:"2px 7px", borderRadius:3 }}><span style={{ width:5,height:5,borderRadius:"50%",background:"#ff3b3b",animation:"blink 1s infinite" }}/>BREAKING</span>}
+        {isStrong && (showTicker || index>0) && <span style={{ fontSize:9, fontWeight:800, padding:"2px 7px", borderRadius:3, background:"rgba(255,140,0,0.15)", color:"#ff8c00", letterSpacing:"0.1em" }}>🔔 ALERT</span>}
+      </div>
+      <div style={{ fontSize:13, fontWeight:600, color:"#eee", lineHeight:1.5, marginBottom:8, fontFamily:"Georgia,serif", paddingRight:16 }}>{item.headline}</div>
+      <div style={{ display:"flex", gap:7, alignItems:"center", flexWrap:"wrap" }}>
+        <SourceBadge provider={item.provider}/>
+        <span style={{ fontSize:11, color:"#444" }}>·</span>
+        <span style={{ fontSize:11, color:"#444", fontFamily:"monospace" }}>{item.source}</span>
+        {item.time && item.time!==item.source && <><span style={{fontSize:11,color:"#333"}}>·</span><span style={{fontSize:11,color:"#333",fontFamily:"monospace"}}>{item.time}</span></>}
+        <span style={{ fontSize:10, fontWeight:700, padding:"2px 7px", borderRadius:20, background:s.bg, color:s.color }}>{s.text}</span>
+      </div>
+      {open && <div style={{ marginTop:10, paddingTop:10, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+        <a href={item.url} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()} style={{ fontSize:12, color:"#e8ff47", textDecoration:"none", fontFamily:"monospace" }}>קרא מאמר מלא ↗</a>
+      </div>}
+      <div style={{ position:"absolute", top:13, right:12, color:"#2a2a2a", fontSize:10 }}>{open?"▲":"▼"}</div>
+    </div>
+  );
+}
+
+// ─── MA SETTINGS PANEL ────────────────────────────────────────────────────────
+function MASettingsPanel({ ticker, currentPeriods, onSave, onClose }) {
+  const [input, setInput] = React.useState(currentPeriods.join(","));
+  const [saving, setSaving] = React.useState(false);
+
+  async function save() {
+    const periods = input.split(",").map(s=>parseInt(s.trim())).filter(n=>n>0&&n<=200);
+    if (periods.length < 1) return;
+    setSaving(true);
+    try {
+      await fetch(`${PROXY}/alerts/config`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ maConfigs: { [ticker]: { periods } } })
+      });
+      onSave(periods);
+    } catch(e) { console.error(e); }
+    setSaving(false);
+  }
+
+  return (
+    <div style={{ background:"rgba(10,10,10,0.98)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:12, padding:20, marginTop:10 }}>
+      <div style={{ fontSize:11, color:"#555", letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:10, fontFamily:"monospace" }}>הגדר ממוצעים נעים</div>
+      <div style={{ fontSize:12, color:"#444", marginBottom:10, lineHeight:1.6 }}>
+        הכנס פריודים מופרדים בפסיק. כשהסדר מתקיים (קצר &gt; ארוך) תגיע התראה לאימייל.
+      </div>
+      <input value={input} onChange={e=>setInput(e.target.value)}
+        placeholder="5,9,20" style={{ width:"100%", boxSizing:"border-box", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:8, padding:"9px 12px", color:"#eee", fontSize:13, fontFamily:"monospace", direction:"ltr", marginBottom:10 }}/>
+      <div style={{ display:"flex", gap:8 }}>
+        {[["5,9,20","קלאסי"],["9,21,55","טרנד"],["20,50,200","ארוך"]].map(([v,lbl])=>(
+          <button key={v} onClick={()=>setInput(v)} style={{ fontSize:11, background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:6, padding:"5px 10px", color:"#666", cursor:"pointer", fontFamily:"monospace" }}>{v} <span style={{color:"#333"}}>({lbl})</span></button>
+        ))}
+      </div>
+      <div style={{ display:"flex", gap:8, marginTop:12 }}>
+        <button onClick={save} disabled={saving} style={{ flex:1, background:"#e8ff47", color:"#080808", border:"none", borderRadius:8, padding:"9px 0", fontWeight:800, fontSize:13, cursor:"pointer" }}>
+          {saving ? "שומר..." : "שמור ועדכן גרף"}
+        </button>
+        <button onClick={onClose} style={{ background:"transparent", border:"1px solid rgba(255,255,255,0.08)", borderRadius:8, padding:"9px 14px", color:"#444", fontSize:13, cursor:"pointer" }}>ביטול</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── ALERTS PANEL ─────────────────────────────────────────────────────────────
+function AlertsPanel({ ticker, maPeriods, onClose }) {
+  const [cfg, setCfg] = React.useState({ gmail_user:"", gmail_pass:"", alert_to:"" });
+  const [wl, setWl] = React.useState([]);
+  const [addTk, setAddTk] = React.useState("");
+  const [status, setStatus] = React.useState(null);
+  const [testing, setTesting] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(()=>{
+    fetch(`${PROXY}/alerts/config`).then(r=>r.json()).then(d=>setWl(d.watchlist||[])).catch(()=>{});
+  },[]);
+
+  async function save() {
+    setSaving(true); setStatus(null);
+    try {
+      const r = await fetch(`${PROXY}/alerts/config`,{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({...cfg, watchlist:wl, maConfigs:{ [ticker]:{ periods:maPeriods } }})});
+      const d = await r.json();
+      setStatus(d.ok ? {type:"ok",msg:"נשמר ✓"} : {type:"err",msg:d.error});
+    } catch { setStatus({type:"err",msg:"שגיאת חיבור לשרת"}); }
+    setSaving(false);
+  }
+
+  async function sendTest() {
+    setTesting(true); setStatus(null);
+    try {
+      const r = await fetch(`${PROXY}/alerts/test`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({to:cfg.alert_to})});
+      const d = await r.json();
+      setStatus(d.ok ? {type:"ok",msg:`נשלח ל-${d.sent_to} ✓`} : {type:"err",msg:d.error});
+    } catch { setStatus({type:"err",msg:"שגיאת חיבור"}); }
+    setTesting(false);
+  }
+
+  const iStyle = { width:"100%", boxSizing:"border-box", background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.09)", borderRadius:8, padding:"10px 12px", color:"#eee", fontSize:13, fontFamily:"monospace", direction:"ltr" };
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", zIndex:100, display:"flex", alignItems:"flex-end", justifyContent:"center", backdropFilter:"blur(4px)" }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#0f0f0f", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"16px 16px 0 0", padding:"26px 22px 40px", width:"100%", maxWidth:540, maxHeight:"85vh", overflowY:"auto" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:22 }}>
+          <div>
+            <div style={{ fontSize:13, fontWeight:800, color:"#e8ff47", letterSpacing:"0.15em", fontFamily:"monospace" }}>PULSE ALERTS</div>
+            <div style={{ fontSize:11, color:"#333", marginTop:2 }}>התראות אימייל — חדשות חזקות + MA Stack</div>
+          </div>
+          <button onClick={onClose} style={{ background:"none",border:"none",color:"#444",fontSize:18,cursor:"pointer" }}>✕</button>
+        </div>
+
+        <div style={{ fontSize:11, color:"#555", letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:8, fontFamily:"monospace" }}>Gmail</div>
+        <div style={{ display:"flex", flexDirection:"column", gap:7, marginBottom:16 }}>
+          <input value={cfg.gmail_user} onChange={e=>setCfg({...cfg,gmail_user:e.target.value})} placeholder="your@gmail.com" type="email" style={iStyle}/>
+          <input value={cfg.gmail_pass} onChange={e=>setCfg({...cfg,gmail_pass:e.target.value})} placeholder="App Password (16 תווים)" type="password" style={iStyle}/>
+          <input value={cfg.alert_to}   onChange={e=>setCfg({...cfg,alert_to:e.target.value})}   placeholder="שלח התראות אל: email@example.com" type="email" style={iStyle}/>
+          <div style={{ fontSize:11, color:"#2a2a2a" }}>
+            <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" style={{ color:"#e8ff47", textDecoration:"none" }}>myaccount.google.com/apppasswords ↗</a>
+          </div>
+        </div>
+
+        <div style={{ fontSize:11, color:"#555", letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:8, fontFamily:"monospace" }}>Watchlist</div>
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 }}>
+          {wl.map(t=>(
+            <span key={t} style={{ display:"inline-flex", alignItems:"center", gap:5, background:"rgba(232,255,71,0.07)", border:"1px solid rgba(232,255,71,0.2)", borderRadius:20, padding:"3px 10px", fontSize:11, color:"#e8ff47", fontFamily:"monospace", fontWeight:700 }}>
+              {t}<button onClick={()=>setWl(wl.filter(s=>s!==t))} style={{ background:"none",border:"none",color:"#666",cursor:"pointer",padding:0,fontSize:12 }}>×</button>
+            </span>
+          ))}
+        </div>
+        <div style={{ display:"flex", gap:6, marginBottom:18 }}>
+          <input value={addTk} onChange={e=>setAddTk(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&(setWl([...wl,addTk.trim()]),setAddTk(""))} placeholder="הוסף מניה..." style={{...iStyle,flex:1}}/>
+          <button onClick={()=>{if(addTk.trim()&&!wl.includes(addTk.trim())){setWl([...wl,addTk.trim()]);setAddTk("");}}} style={{ background:"rgba(232,255,71,0.1)", border:"1px solid rgba(232,255,71,0.25)", borderRadius:8, padding:"10px 14px", color:"#e8ff47", fontSize:13, fontWeight:700, cursor:"pointer" }}>+</button>
+        </div>
+
+        {maPeriods.length >= 2 && (
+          <div style={{ background:"rgba(232,255,71,0.05)", border:"1px solid rgba(232,255,71,0.15)", borderRadius:8, padding:"10px 14px", marginBottom:16, fontSize:12, color:"#888" }}>
+            <span style={{ color:"#e8ff47", fontFamily:"monospace" }}>MA Stack Alert:</span> יישלח כשהממוצעים <span style={{ color:"#e8ff47" }}>{maPeriods.join(" › ")}</span> מסודרים בסדר נכון
+          </div>
+        )}
+
+        {status && <div style={{ marginBottom:12, padding:"10px 14px", borderRadius:8, background:status.type==="ok"?"rgba(0,200,100,0.1)":"rgba(255,60,60,0.1)", border:`1px solid ${status.type==="ok"?"rgba(0,200,100,0.2)":"rgba(255,60,60,0.2)"}`, fontSize:12, color:status.type==="ok"?"#00c864":"#ff6666" }}>{status.msg}</div>}
+
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={save} disabled={saving} style={{ flex:1, background:"#e8ff47", color:"#080808", border:"none", borderRadius:8, padding:"11px 0", fontWeight:800, fontSize:13, cursor:"pointer" }}>{saving?"שומר...":"שמור הגדרות"}</button>
+          <button onClick={sendTest} disabled={testing} style={{ background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:8, padding:"11px 16px", color:"#aaa", fontSize:13, cursor:"pointer" }}>{testing?"שולח...":"🔔 בדיקה"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WATCHLIST BAR ────────────────────────────────────────────────────────────
+function WatchlistBar({ watchlist, ticker, viewMode, onSelect, onAdd, onRemove, onToggleView, alertsOk }) {
+  const [adding, setAdding] = React.useState(false);
+  const [val, setVal] = React.useState("");
+  const inputRef = React.useRef(null);
+
+  React.useEffect(()=>{ if (adding && inputRef.current) inputRef.current.focus(); },[adding]);
+
+  function submit() {
+    const s = val.toUpperCase().trim();
+    if (s) onAdd(s);
+    setVal(""); setAdding(false);
+  }
+
+  return (
+    <div style={{ marginBottom:14 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+        <span style={{ fontSize:11, color:"#444", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"monospace" }}>רשימת מעקב</span>
+        {watchlist.length > 0 && (
+          <button onClick={onToggleView} style={{ display:"flex", alignItems:"center", gap:5, background: viewMode==="feed" ? "rgba(232,255,71,0.1)" : "rgba(255,255,255,0.04)", border: viewMode==="feed" ? "1px solid rgba(232,255,71,0.3)" : "1px solid rgba(255,255,255,0.08)", borderRadius:20, padding:"3px 11px", color: viewMode==="feed" ? "#e8ff47" : "#555", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"monospace" }}>
+            📡 {viewMode==="feed" ? "פיד רשימת מעקב" : "עבור לפיד מעקב"}
+          </button>
+        )}
+      </div>
+
+      <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+        {watchlist.map(t=>(
+          <div key={t} onClick={()=>onSelect(t)} style={{
+            display:"flex", alignItems:"center", gap:6, cursor:"pointer",
+            background: (viewMode==="single" && ticker===t) ? "rgba(232,255,71,0.1)" : "rgba(255,255,255,0.03)",
+            border: (viewMode==="single" && ticker===t) ? "1px solid rgba(232,255,71,0.35)" : "1px solid rgba(255,255,255,0.08)",
+            borderRadius:20, padding:"5px 6px 5px 12px",
+          }}>
+            <span style={{ fontSize:11, fontWeight:700, color: (viewMode==="single" && ticker===t) ? "#e8ff47" : "#999", fontFamily:"monospace" }}>{t}</span>
+            <button onClick={e=>{e.stopPropagation(); onRemove(t);}} style={{ background:"rgba(255,255,255,0.06)", border:"none", borderRadius:"50%", width:16, height:16, display:"flex", alignItems:"center", justifyContent:"center", color:"#666", cursor:"pointer", fontSize:11, padding:0, lineHeight:1 }}>×</button>
+          </div>
+        ))}
+
+        {adding ? (
+          <input ref={inputRef} value={val} onChange={e=>setVal(e.target.value.toUpperCase())}
+            onKeyDown={e=>{ if(e.key==="Enter") submit(); if(e.key==="Escape"){setAdding(false);setVal("");} }}
+            onBlur={()=>{ if(val.trim()) submit(); else setAdding(false); }}
+            placeholder="טיקר..." style={{ width:80, background:"rgba(255,255,255,0.05)", border:"1px solid rgba(232,255,71,0.3)", borderRadius:20, padding:"5px 12px", color:"#eee", fontSize:11, fontFamily:"monospace", fontWeight:700, direction:"ltr" }}/>
+        ) : (
+          <button onClick={()=>setAdding(true)} style={{ display:"flex", alignItems:"center", gap:4, background:"transparent", border:"1px dashed rgba(255,255,255,0.15)", borderRadius:20, padding:"5px 12px", color:"#444", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"monospace" }}>
+            + הוסף
+          </button>
+        )}
+      </div>
+
+      {watchlist.length === 0 && (
+        <div style={{ fontSize:11, color:"#2a2a2a", marginTop:6 }}>
+          הוסף מניות למעקב כדי לקבל פיד חדשות משולב ולקבל התראות {alertsOk ? "" : "(הגדר אימייל תחת 🔔 התראות)"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BREAKOUT SCREENER ────────────────────────────────────────────────────────
+function BreakoutScreener({ onClose, onAddToWatchlist, watchlist, onAddToJournal }) {
+  const [results, setResults] = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError]     = React.useState(null);
+  const [floatFilter, setFloatFilter] = React.useState("u50");
+  const [minPrice, setMinPrice] = React.useState("1");
+  const [scanned, setScanned] = React.useState(null);
+  const [journaled, setJournaled] = React.useState(new Set());
+
+  async function addAllToJournal() {
+    if (!results || !results.length) return;
+    for (const c of results) {
+      await onAddToJournal(c);
+      setJournaled(prev => new Set([...prev, c.ticker]));
+    }
+  }
+
+  const FLOAT_OPTIONS = [
+    { v:"u10", label:"מתחת ל-10M" },
+    { v:"u20", label:"מתחת ל-20M" },
+    { v:"u50", label:"מתחת ל-50M" },
+    { v:"u100", label:"מתחת ל-100M" },
+  ];
+
+  async function scan() {
+    setLoading(true); setError(null); setResults(null);
+    try {
+      const r = await fetch(`${PROXY}/screener/breakout?float=${floatFilter}&minPrice=${minPrice}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      setResults(d.candidates || []);
+      setScanned(d.scanned || null);
+    } catch(e) { setError(e.message.includes("fetch") ? "לא ניתן להתחבר לשרת. הרץ: node server.js" : e.message); }
+    setLoading(false);
+  }
+
+  React.useEffect(()=>{ scan(); },[]);
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", zIndex:100, display:"flex", alignItems:"flex-end", justifyContent:"center", backdropFilter:"blur(4px)" }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#0f0f0f", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"16px 16px 0 0", padding:"24px 20px 40px", width:"100%", maxWidth:640, maxHeight:"88vh", overflowY:"auto" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:18 }}>
+          <div>
+            <div style={{ fontSize:14, fontWeight:800, color:"#e8ff47", letterSpacing:"0.1em", fontFamily:"monospace" }}>🚀 סורק פריצות</div>
+            <div style={{ fontSize:11, color:"#444", marginTop:4, lineHeight:1.6 }}>
+              Unusual Volume ∩ Top Gainers · Float קטן · נסגר קרוב לשיא היומי
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:"#444", fontSize:18, cursor:"pointer" }}>✕</button>
+        </div>
+
+        {/* Filters */}
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:14 }}>
+          <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
+            {FLOAT_OPTIONS.map(opt=>(
+              <button key={opt.v} onClick={()=>setFloatFilter(opt.v)} style={{ background:floatFilter===opt.v?"rgba(232,255,71,0.1)":"rgba(255,255,255,0.04)", border:floatFilter===opt.v?"1px solid rgba(232,255,71,0.3)":"1px solid rgba(255,255,255,0.08)", borderRadius:7, padding:"5px 10px", color:floatFilter===opt.v?"#e8ff47":"#555", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"monospace" }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+            <span style={{ fontSize:11, color:"#444" }}>מחיר מינ׳ $</span>
+            <input value={minPrice} onChange={e=>setMinPrice(e.target.value)} type="number" min="0" step="0.5"
+              style={{ width:55, background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.09)", borderRadius:6, padding:"4px 8px", color:"#eee", fontSize:11, fontFamily:"monospace", direction:"ltr" }}/>
+          </div>
+          <button onClick={scan} disabled={loading} style={{ background:"#e8ff47", color:"#080808", border:"none", borderRadius:7, padding:"5px 14px", fontSize:11, fontWeight:800, cursor:"pointer" }}>
+            {loading?"סורק...":"↻ סרוק"}
+          </button>
+        </div>
+
+        {scanned && !loading && (
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:8 }}>
+            <div style={{ fontSize:10, color:"#2a2a2a", fontFamily:"monospace" }}>
+              נסרקו {scanned.unusualVolume} מניות ב-Unusual Volume · {scanned.topGainers} ב-Top Gainers · {scanned.overlap} חפיפה
+            </div>
+            {results && results.length > 0 && (
+              <button onClick={addAllToJournal} style={{ background:"rgba(255,140,0,0.1)", border:"1px solid rgba(255,140,0,0.25)", borderRadius:7, padding:"4px 12px", color:"#ff8c00", fontSize:11, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
+                📝 הוסף הכל ליומן ({results.length})
+              </button>
+            )}
+          </div>
+        )}
+
+        {loading && (
+          <div style={{ textAlign:"center", padding:"50px 0" }}>
+            <div style={{ width:28,height:28,borderRadius:"50%",border:"2px solid rgba(232,255,71,0.15)",borderTop:"2px solid #e8ff47",margin:"0 auto 16px",animation:"spin 0.8s linear infinite" }}/>
+            <div style={{ color:"#333", fontSize:12 }}>סורק את כל השוק... עד 30 שניות</div>
+          </div>
+        )}
+
+        {error && (
+          <div style={{ background:"rgba(255,60,60,0.07)", border:"1px solid rgba(255,60,60,0.15)", borderRadius:10, padding:18 }}>
+            <div style={{ color:"#ff6666", fontSize:13, marginBottom:8 }}>{error}</div>
+            <button onClick={scan} style={{ background:"transparent", border:"1px solid rgba(255,60,60,0.25)", borderRadius:7, padding:"7px 14px", color:"#ff6666", fontSize:12, cursor:"pointer" }}>נסה שנית</button>
+          </div>
+        )}
+
+        {!loading && results && results.length === 0 && (
+          <div style={{ textAlign:"center", padding:"40px 0", color:"#2a2a2a", fontSize:12 }}>
+            אין כרגע חפיפה בין Unusual Volume ל-Top Gainers בפילטר הזה.<br/>נסה טווח float רחב יותר.
+          </div>
+        )}
+
+        {!loading && results && results.length > 0 && (
+          <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {results.map(c=>(
+              <div key={c.ticker} style={{ background: c.closeNearHigh ? "rgba(232,255,71,0.04)" : "rgba(255,255,255,0.025)", border: c.closeNearHigh ? "1px solid rgba(232,255,71,0.25)" : "1px solid rgba(255,255,255,0.06)", borderRadius:10, padding:"13px 15px" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+                  <div>
+                    <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                      <span style={{ fontSize:16, fontWeight:800, fontFamily:"monospace" }}>{c.ticker}</span>
+                      {c.closeNearHigh && <span style={{ fontSize:9, fontWeight:800, background:"#e8ff47", color:"#080808", padding:"1px 6px", borderRadius:3, letterSpacing:"0.06em" }}>NEAR HIGH</span>}
+                    </div>
+                    {c.company && <div style={{ fontSize:11, color:"#444", marginTop:1 }}>{c.company}</div>}
+                  </div>
+                  <div style={{ display:"flex", gap:6 }}>
+                    <button onClick={()=>onAddToWatchlist(c.ticker)} disabled={watchlist.includes(c.ticker)} style={{ background: watchlist.includes(c.ticker) ? "rgba(255,255,255,0.04)" : "rgba(232,255,71,0.1)", border: watchlist.includes(c.ticker) ? "1px solid rgba(255,255,255,0.08)" : "1px solid rgba(232,255,71,0.25)", borderRadius:7, padding:"4px 10px", color: watchlist.includes(c.ticker) ? "#333" : "#e8ff47", fontSize:11, fontWeight:700, cursor: watchlist.includes(c.ticker) ? "default" : "pointer", whiteSpace:"nowrap" }}>
+                      {watchlist.includes(c.ticker) ? "✓ ברשימה" : "+ עקוב"}
+                    </button>
+                    <button onClick={()=>onAddToWatchlist(c.ticker, true)} style={{ background:"rgba(0,180,255,0.1)", border:"1px solid rgba(0,180,255,0.25)", borderRadius:7, padding:"4px 10px", color:"#00b4ff", fontSize:11, fontWeight:700, cursor:"pointer", whiteSpace:"nowrap" }}>
+                      📊 גרף
+                    </button>
+                    <button onClick={async()=>{ await onAddToJournal(c); setJournaled(prev=>new Set([...prev,c.ticker])); }} disabled={journaled.has(c.ticker)} style={{ background: journaled.has(c.ticker) ? "rgba(255,255,255,0.04)" : "rgba(255,140,0,0.1)", border: journaled.has(c.ticker) ? "1px solid rgba(255,255,255,0.08)" : "1px solid rgba(255,140,0,0.25)", borderRadius:7, padding:"4px 10px", color: journaled.has(c.ticker) ? "#333" : "#ff8c00", fontSize:11, fontWeight:700, cursor: journaled.has(c.ticker) ? "default" : "pointer", whiteSpace:"nowrap" }}>
+                      {journaled.has(c.ticker) ? "✓ ביומן" : "📝 יומן"}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:6 }}>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", letterSpacing:"0.06em" }}>מחיר</div>
+                    <div style={{ fontSize:12, fontWeight:700, fontFamily:"monospace", color:"#ccc" }}>${c.price?.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", letterSpacing:"0.06em" }}>שינוי</div>
+                    <div style={{ fontSize:12, fontWeight:700, fontFamily:"monospace", color: c.change>=0?"#00c864":"#ff4444" }}>{c.change>=0?"+":""}{c.change?.toFixed(1)}%</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", letterSpacing:"0.06em" }}>וו׳ יחסי</div>
+                    <div style={{ fontSize:12, fontWeight:700, fontFamily:"monospace", color:"#00b4ff" }}>{c.volRatio?`${c.volRatio.toFixed(1)}×`:"—"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", letterSpacing:"0.06em" }}>ממרחק לשיא</div>
+                    <div style={{ fontSize:12, fontWeight:700, fontFamily:"monospace", color: c.closeNearHigh?"#e8ff47":"#666" }}>{c.distFromHighPct}%</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop:18, padding:12, background:"rgba(255,140,0,0.05)", border:"1px solid rgba(255,140,0,0.15)", borderRadius:8, fontSize:11, color:"#888", lineHeight:1.6 }}>
+          ⚠️ זהו כלי סינון, לא תחזית. ווליום חריג + סגירה קרוב לשיא <em>לפעמים</em> מקדים המשך תנועה, אבל גם לא פעם זו "מלכודת" שמתהפכת. בדוק תמיד חדשות, גרף, ושווי שוק לפני כל פעולה.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── JOURNAL PANEL ────────────────────────────────────────────────────────────
+function JournalPanel({ onClose }) {
+  const [entries, setEntries] = React.useState([]);
+  const [stats, setStats]     = React.useState(null);
+  const [loading, setLoading] = React.useState(false);
+  const [refreshing, setRefreshing] = React.useState(false);
+  const [error, setError]     = React.useState(null);
+
+  async function load() {
+    setLoading(true); setError(null);
+    try {
+      const r = await fetch(`${PROXY}/journal`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      setEntries(d.entries || []); setStats(d.stats || null);
+    } catch(e) { setError(e.message.includes("fetch") ? "לא ניתן להתחבר לשרת. הרץ: node server.js" : e.message); }
+    setLoading(false);
+  }
+
+  async function refresh() {
+    setRefreshing(true);
+    try {
+      const r = await fetch(`${PROXY}/journal/refresh`, { method:"POST" });
+      const d = await r.json();
+      setEntries(d.entries || []); setStats(d.stats || null);
+    } catch(e) { /* silent */ }
+    setRefreshing(false);
+  }
+
+  async function removeEntry(id) {
+    setEntries(entries.filter(e=>e.id!==id));
+    try { await fetch(`${PROXY}/journal/remove`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({id}) }); } catch(e) {}
+  }
+
+  React.useEffect(()=>{ load(); },[]);
+
+  const pctColor = v => v == null ? "#444" : v > 0 ? "#00c864" : v < 0 ? "#ff4444" : "#888";
+  const pctText  = v => v == null ? "—" : `${v>0?"+":""}${v}%`;
+
+  return (
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", zIndex:100, display:"flex", alignItems:"flex-end", justifyContent:"center", backdropFilter:"blur(4px)" }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#0f0f0f", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"16px 16px 0 0", padding:"24px 20px 40px", width:"100%", maxWidth:720, maxHeight:"88vh", overflowY:"auto" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:14, fontWeight:800, color:"#ff8c00", letterSpacing:"0.1em", fontFamily:"monospace" }}>📝 יומן מעקב</div>
+            <div style={{ fontSize:11, color:"#444", marginTop:4 }}>מעקב נייר (paper) — לא מסחר אמיתי. בודק מה קרה בפועל למועמדות מהסורק.</div>
+          </div>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:"#444", fontSize:18, cursor:"pointer" }}>✕</button>
+        </div>
+
+        {/* Stats summary */}
+        {stats && stats.count > 0 && (
+          <div style={{ background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:10, padding:14, marginBottom:16 }}>
+            <div style={{ fontSize:10, color:"#444", letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:10, fontFamily:"monospace" }}>
+              סטטיסטיקה מצטברת · {stats.count} מועמדות · {stats.withDay5} עם נתוני 5 ימים מלאים
+            </div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+              <div style={{ background:"rgba(255,255,255,0.03)", borderRadius:8, padding:"10px 8px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", marginBottom:4 }}>Gap ממוצע למחרת</div>
+                <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color:pctColor(stats.avgGapPct) }}>{pctText(stats.avgGapPct)}</div>
+                <div style={{ fontSize:9, color:"#333", marginTop:2 }}>{stats.gapUpRate!=null?`${stats.gapUpRate}% פתחו למעלה`:""}</div>
+              </div>
+              <div style={{ background:"rgba(255,255,255,0.03)", borderRadius:8, padding:"10px 8px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", marginBottom:4 }}>תשואה אחרי 3 ימים</div>
+                <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color:pctColor(stats.avgDay3Pct) }}>{pctText(stats.avgDay3Pct)}</div>
+                <div style={{ fontSize:9, color:"#333", marginTop:2 }}>{stats.day3WinRate!=null?`${stats.day3WinRate}% חיוביות`:""}</div>
+              </div>
+              <div style={{ background:"rgba(255,255,255,0.03)", borderRadius:8, padding:"10px 8px", textAlign:"center" }}>
+                <div style={{ fontSize:9, color:"#333", textTransform:"uppercase", marginBottom:4 }}>תשואה אחרי 5 ימים</div>
+                <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color:pctColor(stats.avgDay5Pct) }}>{pctText(stats.avgDay5Pct)}</div>
+                <div style={{ fontSize:9, color:"#333", marginTop:2 }}>{stats.day5WinRate!=null?`${stats.day5WinRate}% חיוביות`:""}</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display:"flex", justifyContent:"flex-end", marginBottom:10 }}>
+          <button onClick={refresh} disabled={refreshing} style={{ background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:7, padding:"5px 12px", color:"#888", fontSize:11, cursor:"pointer" }}>
+            {refreshing?"מעדכן...":"↻ עדכן נתונים"}
+          </button>
+        </div>
+
+        {loading && (
+          <div style={{ textAlign:"center", padding:"40px 0" }}>
+            <div style={{ width:24,height:24,borderRadius:"50%",border:"2px solid rgba(232,255,71,0.15)",borderTop:"2px solid #e8ff47",margin:"0 auto 12px",animation:"spin 0.8s linear infinite" }}/>
+          </div>
+        )}
+
+        {error && (
+          <div style={{ background:"rgba(255,60,60,0.07)", border:"1px solid rgba(255,60,60,0.15)", borderRadius:10, padding:18 }}>
+            <div style={{ color:"#ff6666", fontSize:13, marginBottom:8 }}>{error}</div>
+            <button onClick={load} style={{ background:"transparent", border:"1px solid rgba(255,60,60,0.25)", borderRadius:7, padding:"7px 14px", color:"#ff6666", fontSize:12, cursor:"pointer" }}>נסה שנית</button>
+          </div>
+        )}
+
+        {!loading && entries.length === 0 && !error && (
+          <div style={{ textAlign:"center", padding:"40px 0", color:"#2a2a2a", fontSize:12 }}>
+            עדיין אין מועמדות ביומן.<br/>לך ל-🚀 סורק פריצות ולחץ "📝 יומן" על מועמדת.
+          </div>
+        )}
+
+        {!loading && entries.length > 0 && (
+          <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+            {entries.map(e=>(
+              <div key={e.id} style={{ background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:9, padding:"12px 14px" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:8 }}>
+                  <div>
+                    <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+                      <span style={{ fontSize:14, fontWeight:800, fontFamily:"monospace" }}>{e.ticker}</span>
+                      <span style={{ fontSize:10, color:"#333", fontFamily:"monospace" }}>{e.addedDate}</span>
+                      <span style={{ fontSize:9, fontWeight:700, padding:"1px 6px", borderRadius:3, background: e.status==="complete"?"rgba(0,200,100,0.1)":e.status==="tracking"?"rgba(0,180,255,0.1)":"rgba(255,255,255,0.06)", color: e.status==="complete"?"#00c864":e.status==="tracking"?"#00b4ff":"#666", textTransform:"uppercase" }}>
+                        {e.status==="complete"?"הושלם":e.status==="tracking"?"במעקב":"חדש"}
+                      </span>
+                    </div>
+                    {e.company && <div style={{ fontSize:10, color:"#444", marginTop:1 }}>{e.company}</div>}
+                  </div>
+                  <button onClick={()=>removeEntry(e.id)} style={{ background:"none", border:"none", color:"#333", fontSize:14, cursor:"pointer", padding:0 }}>×</button>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6 }}>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase" }}>נכנס ב-</div>
+                    <div style={{ fontSize:11, fontWeight:700, fontFamily:"monospace", color:"#999" }}>${e.addedPrice?.toFixed(2)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase" }}>Gap למחרת</div>
+                    <div style={{ fontSize:11, fontWeight:700, fontFamily:"monospace", color:pctColor(e.day1?.gapPct) }}>{e.day1 ? pctText(e.day1.gapPct) : "⏳"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase" }}>סוף יום 1</div>
+                    <div style={{ fontSize:11, fontWeight:700, fontFamily:"monospace", color:pctColor(e.day1?.dayPct) }}>{e.day1 ? pctText(e.day1.dayPct) : "⏳"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase" }}>+3 ימים</div>
+                    <div style={{ fontSize:11, fontWeight:700, fontFamily:"monospace", color:pctColor(e.day3?.pct) }}>{e.day3 ? pctText(e.day3.pct) : "⏳"}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize:9, color:"#333", textTransform:"uppercase" }}>+5 ימים</div>
+                    <div style={{ fontSize:11, fontWeight:700, fontFamily:"monospace", color:pctColor(e.day5?.pct) }}>{e.day5 ? pctText(e.day5.pct) : "⏳"}</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop:18, padding:12, background:"rgba(255,140,0,0.05)", border:"1px solid rgba(255,140,0,0.15)", borderRadius:8, fontSize:11, color:"#888", lineHeight:1.6 }}>
+          📊 הנתונים מתעדכנים אוטומטית כל 30 דקות, ועוצרים לאחר 5 ימי מסחר לכל מועמדת. אלה הנתונים האמיתיים והרלוונטיים ביותר — שלך, על הקריטריונים שלך, לא הערכה כללית מהאינטרנט.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+function App() {
+  const [ticker, setTicker]   = React.useState("NVDA");
+  const [input,  setInput]    = React.useState("NVDA");
+  const [news,   setNews]     = React.useState([]);
+  const [chart,  setChart]    = React.useState(null);
+  const [newsLoading, setNL]  = React.useState(false);
+  const [chartLoading,setCL]  = React.useState(false);
+  const [newsError,  setNE]   = React.useState(null);
+  const [chartError, setCE]   = React.useState(null);
+  const [sources, setSources] = React.useState({ finviz:0, yahoo:0 });
+  const [updatedAt, setUA]    = React.useState(null);
+  const [activeInterval, setAI] = React.useState(INTERVALS[0]);
+  const [maPeriods, setMAPeriods] = React.useState([5,9,20]);
+  const [showMASettings, setShowMAS] = React.useState(false);
+  const [showAlerts, setShowAlerts]   = React.useState(false);
+  const [showScreener, setShowScreener] = React.useState(false);
+  const [showJournal, setShowJournal] = React.useState(false);
+  const [alertsOk, setAlertsOk]       = React.useState(false);
+  const [liveOn, setLiveOn]           = React.useState(true);
+  const [countdown, setCountdown]     = React.useState(30);
+  const [watchlist, setWatchlist]     = React.useState([]);
+  const [viewMode, setViewMode]       = React.useState("single"); // "single" | "feed"
+  const [feedNews, setFeedNews]       = React.useState([]);
+  const [feedLoading, setFeedLoading] = React.useState(false);
+  const [feedError, setFeedError]     = React.useState(null);
+  const [feedSources, setFeedSources] = React.useState({ finviz:0, yahoo:0 });
+  const [feedUpdatedAt, setFeedUA]    = React.useState(null);
+  const watchlistRef = React.useRef(watchlist);
+  const viewModeRef  = React.useRef(viewMode);
+  React.useEffect(()=>{ watchlistRef.current = watchlist; },[watchlist]);
+  React.useEffect(()=>{ viewModeRef.current = viewMode; },[viewMode]);
+
+  const REFRESH_MS = 30000;
+  const tickerRef = React.useRef(ticker);
+  const intervalRef = React.useRef(activeInterval);
+  const maPeriodsRef = React.useRef(maPeriods);
+  React.useEffect(()=>{ tickerRef.current = ticker; },[ticker]);
+  React.useEffect(()=>{ intervalRef.current = activeInterval; },[activeInterval]);
+  React.useEffect(()=>{ maPeriodsRef.current = maPeriods; },[maPeriods]);
+
+  React.useEffect(()=>{
+    fetchNews("NVDA");
+    fetchChart("NVDA", INTERVALS[0]);
+    fetch(`${PROXY}/alerts/config`).then(r=>r.json()).then(d=>{
+      setAlertsOk(d.configured);
+      if (d.maConfigs?.NVDA?.periods) setMAPeriods(d.maConfigs.NVDA.periods);
+      if (Array.isArray(d.watchlist) && d.watchlist.length) {
+        setWatchlist(d.watchlist);
+        fetchFeed(d.watchlist);
+      }
+    }).catch(()=>{});
+  },[]);
+
+  async function persistWatchlist(list) {
+    try {
+      await fetch(`${PROXY}/alerts/config`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ watchlist: list })
+      });
+    } catch(e) { /* server may be offline — keep local state regardless */ }
+  }
+
+  function addToWatchlist(sym, andOpen) {
+    if (!watchlist.includes(sym)) {
+      const updated = [...watchlist, sym];
+      setWatchlist(updated);
+      persistWatchlist(updated);
+      if (viewMode === "feed" || updated.length === 1) fetchFeed(updated);
+    }
+    if (andOpen) {
+      setShowScreener(false);
+      selectFromWatchlist(sym);
+    }
+  }
+
+  async function addToJournal(candidate) {
+    try {
+      await fetch(`${PROXY}/journal/add`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({
+          ticker: candidate.ticker,
+          company: candidate.company,
+          price: candidate.price,
+          change: candidate.change,
+          volRatio: candidate.volRatio,
+          distFromHighPct: candidate.distFromHighPct,
+        })
+      });
+    } catch(e) { /* server may be offline */ }
+  }
+
+  function removeFromWatchlist(sym) {
+    const updated = watchlist.filter(s=>s!==sym);
+    setWatchlist(updated);
+    persistWatchlist(updated);
+    if (updated.length === 0) setViewMode("single");
+    else if (viewMode === "feed") fetchFeed(updated);
+  }
+
+  function selectFromWatchlist(sym) {
+    setViewMode("single");
+    search(sym);
+  }
+
+  function toggleView() {
+    const next = viewMode === "feed" ? "single" : "feed";
+    setViewMode(next);
+    if (next === "feed" && watchlist.length) fetchFeed(watchlist);
+  }
+
+  async function fetchFeed(list) {
+    const tickers = (list || watchlist);
+    if (!tickers.length) return;
+    setFeedLoading(true); setFeedError(null);
+    try {
+      const r = await fetch(`${PROXY}/news/multi?tickers=${tickers.join(",")}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      setFeedNews(d.news||[]); setFeedSources(d.sources||{}); setFeedUA(new Date().toLocaleTimeString("he-IL"));
+    } catch(e) { setFeedError(e.message.includes("fetch") ? "לא ניתן להתחבר לשרת. הרץ: node server.js" : e.message); }
+    setFeedLoading(false);
+  }
+
+  async function softRefreshFeed(list) {
+    const tickers = (list || watchlistRef.current);
+    if (!tickers.length) return;
+    try {
+      const r = await fetch(`${PROXY}/news/multi?tickers=${tickers.join(",")}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.error) return;
+      setFeedNews(d.news||[]); setFeedSources(d.sources||{}); setFeedUA(new Date().toLocaleTimeString("he-IL"));
+      setFeedError(null);
+    } catch(e) { /* silent */ }
+  }
+
+  // ── AUTO-REFRESH every 30s, paused when tab hidden or liveOn=false ──
+  React.useEffect(()=>{
+    if (!liveOn) return;
+    setCountdown(30);
+    const tick = setInterval(()=>{
+      setCountdown(c=>{
+        if (c <= 1) {
+          if (document.visibilityState === "visible") {
+            if (viewModeRef.current === "feed") {
+              softRefreshFeed(watchlistRef.current);
+            } else {
+              softRefreshChart(tickerRef.current, intervalRef.current, maPeriodsRef.current);
+              softRefreshNews(tickerRef.current);
+            }
+          }
+          return 30;
+        }
+        return c - 1;
+      });
+    }, 1000);
+    return ()=>clearInterval(tick);
+  },[liveOn]);
+
+  React.useEffect(()=>{
+    function onVis() {
+      if (document.visibilityState === "visible" && liveOn) {
+        if (viewModeRef.current === "feed") {
+          softRefreshFeed(watchlistRef.current);
+        } else {
+          softRefreshChart(tickerRef.current, intervalRef.current, maPeriodsRef.current);
+          softRefreshNews(tickerRef.current);
+        }
+        setCountdown(30);
+      }
+    }
+    document.addEventListener("visibilitychange", onVis);
+    return ()=>document.removeEventListener("visibilitychange", onVis);
+  },[liveOn]);
+
+  async function fetchNews(sym) {
+    setNL(true); setNE(null); setNews([]);
+    try {
+      const r = await fetch(`${PROXY}/news?ticker=${sym}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      setNews(d.news||[]); setSources(d.sources||{}); setUA(new Date().toLocaleTimeString("he-IL"));
+    } catch(e) { setNE(e.message.includes("fetch") ? "לא ניתן להתחבר לשרת. הרץ: node server.js" : e.message); }
+    setNL(false);
+  }
+
+  // Soft refresh — no loading spinner, just silently updates data
+  async function softRefreshNews(sym) {
+    try {
+      const r = await fetch(`${PROXY}/news?ticker=${sym}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.error) return;
+      setNews(d.news||[]); setSources(d.sources||{}); setUA(new Date().toLocaleTimeString("he-IL"));
+      setNE(null);
+    } catch(e) { /* silent fail — keep showing last known data */ }
+  }
+
+  async function fetchChart(sym, iv, periods) {
+    const ps = periods || maPeriods;
+    setCL(true); setCE(null);
+    try {
+      const maParam = ps.join(",");
+      const r = await fetch(`${PROXY}/chart?ticker=${sym}&interval=${iv.interval}&range=${iv.range}&ma=${maParam}`);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+      setChart(d);
+    } catch(e) { setCE(e.message.includes("fetch") ? "שרת לא זמין" : e.message); }
+    setCL(false);
+  }
+
+  // Soft refresh — no loading spinner, just silently updates data
+  async function softRefreshChart(sym, iv, periods) {
+    try {
+      const maParam = (periods||maPeriodsRef.current).join(",");
+      const r = await fetch(`${PROXY}/chart?ticker=${sym}&interval=${iv.interval}&range=${iv.range}&ma=${maParam}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.error) return;
+      setChart(d);
+      setCE(null);
+    } catch(e) { /* silent fail — keep showing last known data */ }
+  }
+
+  function search(sym) {
+    const s = (sym||input).toUpperCase().trim();
+    if (!s) return;
+    setTicker(s); setInput(s);
+    fetchNews(s);
+    fetchChart(s, activeInterval);
+    setCountdown(30);
+  }
+
+  function changeInterval(iv) {
+    setAI(iv);
+    fetchChart(ticker, iv);
+    setCountdown(30);
+  }
+
+  const price = chart?.regularMarketPrice;
+  const prevClose = chart?.previousClose;
+  const change = price && prevClose ? price - prevClose : null;
+  const changePct = change && prevClose ? (change / prevClose) * 100 : null;
+  const isUp = change >= 0;
+  const bullCount = news.filter(n=>n.sentiment==="bullish").length;
+  const bearCount = news.filter(n=>n.sentiment==="bearish").length;
+  const maStackActive = chart?.maStack?.bullish || chart?.maStack?.bearish;
+
+  return (
+    <div style={{ minHeight:"100vh", background:"#080808", color:"#eee", fontFamily:"Inter,-apple-system,sans-serif", paddingBottom:60 }}>
+      <style>{`
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        input::placeholder{color:#2a2a2a}
+        input:focus{outline:none;border-color:rgba(232,255,71,0.4)!important}
+        * { box-sizing: border-box; }
+      `}</style>
+
+      {/* HEADER */}
+      <div style={{ borderBottom:"1px solid rgba(255,255,255,0.06)", padding:"16px 18px 13px", position:"sticky", top:0, zIndex:20, background:"rgba(8,8,8,0.96)", backdropFilter:"blur(16px)" }}>
+        <div style={{ maxWidth:900, margin:"0 auto" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:12 }}>
+            <span style={{ fontSize:13, fontWeight:900, color:"#e8ff47", letterSpacing:"0.18em", fontFamily:"monospace" }}>PULSE</span>
+            <span style={{ fontSize:10, color:"#2a2a2a", letterSpacing:"0.1em", textTransform:"uppercase" }}>Stock Intelligence</span>
+            <div style={{ marginLeft:"auto", display:"flex", gap:8, alignItems:"center" }}>
+              <span style={{ fontSize:10, color:"#00b4ff", fontFamily:"monospace", fontWeight:700 }}>FV</span>
+              <span style={{ fontSize:10, color:"#2a2a2a" }}>+</span>
+              <span style={{ fontSize:10, color:"#a066ff", fontFamily:"monospace", fontWeight:700 }}>YF</span>
+              <button onClick={()=>setShowScreener(true)} style={{ display:"flex", alignItems:"center", gap:5, background:"rgba(255,140,0,0.08)", border:"1px solid rgba(255,140,0,0.25)", borderRadius:20, padding:"4px 11px", color:"#ff8c00", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                🚀 <span>סורק</span>
+              </button>
+              <button onClick={()=>setShowJournal(true)} style={{ display:"flex", alignItems:"center", gap:5, background:"rgba(255,140,0,0.08)", border:"1px solid rgba(255,140,0,0.25)", borderRadius:20, padding:"4px 11px", color:"#ff8c00", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                📝 <span>יומן</span>
+              </button>
+              <button onClick={()=>setShowAlerts(true)} style={{ display:"flex", alignItems:"center", gap:5, background:alertsOk?"rgba(232,255,71,0.08)":"rgba(255,255,255,0.04)", border:alertsOk?"1px solid rgba(232,255,71,0.25)":"1px solid rgba(255,255,255,0.07)", borderRadius:20, padding:"4px 11px", color:alertsOk?"#e8ff47":"#444", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                🔔 <span>התראות{alertsOk?" ✓":""}</span>
+              </button>
+            </div>
+          </div>
+          <div style={{ display:"flex", gap:8 }}>
+            <input value={input} onChange={e=>setInput(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&search()}
+              placeholder="סימבול מניה..." style={{ flex:1, background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.09)", borderRadius:9, padding:"10px 13px", color:"#eee", fontSize:14, fontFamily:"monospace", fontWeight:700, letterSpacing:"0.06em", direction:"ltr" }}/>
+            <button onClick={()=>search()} style={{ background:"#e8ff47", color:"#080808", border:"none", borderRadius:9, padding:"10px 18px", fontWeight:800, fontSize:13, cursor:"pointer" }}>חפש</button>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth:900, margin:"0 auto", padding:"0 18px" }}>
+
+        {/* Watchlist */}
+        <WatchlistBar
+          watchlist={watchlist}
+          ticker={ticker}
+          viewMode={viewMode}
+          onSelect={selectFromWatchlist}
+          onAdd={addToWatchlist}
+          onRemove={removeFromWatchlist}
+          onToggleView={toggleView}
+          alertsOk={alertsOk}
+        />
+
+        {/* Quick tickers (suggestions) */}
+        <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"0 0 14px" }}>
+          {POPULAR.filter(t=>!watchlist.includes(t)).map(t=>(
+            <button key={t} onClick={()=>{ search(t); setViewMode("single"); }} style={{ background:ticker===t && viewMode==="single" ?"rgba(232,255,71,0.08)":"transparent", border:ticker===t && viewMode==="single" ?"1px solid rgba(232,255,71,0.3)":"1px solid rgba(255,255,255,0.07)", borderRadius:20, padding:"4px 11px", color:ticker===t && viewMode==="single" ?"#e8ff47":"#333", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"monospace" }}>{t}</button>
+          ))}
+        </div>
+
+        {/* Price header */}
+        {viewMode==="single" && (
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14, flexWrap:"wrap", gap:8 }}>
+          <div>
+            <div style={{ display:"flex", alignItems:"baseline", gap:10 }}>
+              <span style={{ fontSize:26, fontWeight:900, fontFamily:"monospace", letterSpacing:"-0.02em" }}>{ticker}</span>
+              {NAMES[ticker] && <span style={{ fontSize:12, color:"#444" }}>{NAMES[ticker]}</span>}
+            </div>
+            {price && (
+              <div style={{ display:"flex", alignItems:"baseline", gap:10, marginTop:4 }}>
+                <span style={{ fontSize:28, fontWeight:800, fontFamily:"monospace", color:"#eee" }}>${price.toFixed(2)}</span>
+                {change != null && (
+                  <span style={{ fontSize:14, fontWeight:700, color:isUp?"#00c864":"#ff4444", fontFamily:"monospace" }}>
+                    {isUp?"+":""}{change.toFixed(2)} ({isUp?"+":""}{changePct.toFixed(2)}%)
+                  </span>
+                )}
+              </div>
+            )}
+          </div>
+          {updatedAt && (
+            <div style={{ textAlign:"right" }}>
+              <div style={{ fontSize:10, color:"#2a2a2a", fontFamily:"monospace" }}>{updatedAt}</div>
+              <button onClick={()=>setLiveOn(!liveOn)} style={{ display:"flex", alignItems:"center", gap:5, background:"none", border:"none", cursor:"pointer", padding:0, marginTop:2, marginLeft:"auto" }}>
+                {liveOn ? (
+                  <>
+                    <span style={{ width:6, height:6, borderRadius:"50%", background:"#e8ff47", animation:"blink 1.2s infinite" }}/>
+                    <span style={{ fontSize:10, color:"#e8ff47", fontFamily:"monospace", fontWeight:700 }}>LIVE · {countdown}s</span>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ width:6, height:6, borderRadius:"50%", background:"#444" }}/>
+                    <span style={{ fontSize:10, color:"#444", fontFamily:"monospace" }}>מושהה</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* CHART SECTION */}
+        <div style={{ background:"rgba(255,255,255,0.02)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:12, padding:"14px 16px", marginBottom:14 }}>
+          {/* Interval selector + MA button */}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12, flexWrap:"wrap", gap:8 }}>
+            <div style={{ display:"flex", gap:5 }}>
+              {INTERVALS.map(iv=>(
+                <button key={iv.label} onClick={()=>changeInterval(iv)} style={{ background:activeInterval.label===iv.label?"rgba(232,255,71,0.12)":"transparent", border:activeInterval.label===iv.label?"1px solid rgba(232,255,71,0.35)":"1px solid rgba(255,255,255,0.07)", borderRadius:7, padding:"4px 11px", color:activeInterval.label===iv.label?"#e8ff47":"#444", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"monospace" }}>
+                  {iv.label}
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>setShowMAS(!showMASettings)} style={{ display:"flex", alignItems:"center", gap:5, background: maStackActive?"rgba(232,255,71,0.08)":"rgba(255,255,255,0.04)", border:maStackActive?"1px solid rgba(232,255,71,0.25)":"1px solid rgba(255,255,255,0.07)", borderRadius:7, padding:"4px 12px", color:maStackActive?"#e8ff47":"#555", fontSize:11, fontWeight:700, cursor:"pointer", fontFamily:"monospace" }}>
+              MA {maPeriods.join("·")} {showMASettings?"▲":"▼"}
+            </button>
+          </div>
+
+          {showMASettings && (
+            <MASettingsPanel ticker={ticker} currentPeriods={maPeriods} onClose={()=>setShowMAS(false)}
+              onSave={periods=>{ setMAPeriods(periods); setShowMAS(false); fetchChart(ticker, activeInterval, periods); }}/>
+          )}
+
+          {/* MA Stack banner */}
+          {maStackActive && !showMASettings && (
+            <div style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background: chart.maStack.bullish?"rgba(0,200,100,0.08)":"rgba(255,60,60,0.08)", border:`1px solid ${chart.maStack.bullish?"rgba(0,200,100,0.2)":"rgba(255,60,60,0.2)"}`, borderRadius:8, marginBottom:12, fontSize:12 }}>
+              <span style={{ fontSize:14 }}>{chart.maStack.bullish?"▲":"▼"}</span>
+              <span style={{ color:chart.maStack.bullish?"#00c864":"#ff4444", fontWeight:700 }}>MA Stack {chart.maStack.bullish?"Bullish":"Bearish"}</span>
+              <span style={{ color:"#444" }}>— {maPeriods.sort((a,b)=>a-b).join(" › ")} מסודרים {chart.maStack.bullish?"מעל":"מתחת"} זה לזה</span>
+              {alertsOk && <span style={{ marginLeft:"auto", fontSize:11, color:"#555" }}>📧 התראה תישלח</span>}
+            </div>
+          )}
+
+          {/* Chart canvas */}
+          {chartLoading && (
+            <div style={{ height:340, display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <div style={{ width:28, height:28, borderRadius:"50%", border:"2px solid rgba(232,255,71,0.15)", borderTop:"2px solid #e8ff47", animation:"spin 0.8s linear infinite" }}/>
+            </div>
+          )}
+          {chartError && !chartLoading && (
+            <div style={{ height:200, display:"flex", alignItems:"center", justifyContent:"center", color:"#ff6666", fontSize:13 }}>
+              {chartError} — <button onClick={()=>fetchChart(ticker,activeInterval)} style={{ background:"none", border:"none", color:"#e8ff47", cursor:"pointer", fontSize:13 }}>נסה שנית</button>
+            </div>
+          )}
+          {!chartLoading && !chartError && chart?.candles?.length > 0 && (
+            <CandleChart candles={chart.candles} mas={chart.mas||{}} maPeriods={maPeriods} height={340} />
+          )}
+
+          {/* MA Legend */}
+          {!chartLoading && chart && (
+            <MALegend maPeriods={maPeriods} maStack={chart.maStack} />
+          )}
+
+          <div style={{ marginTop:8, fontSize:10, color:"#2a2a2a", fontFamily:"monospace" }}>
+            {activeInterval.desc} · Yahoo Finance · נתונים בעיכוב של כ-15 דקות · מתעדכן אוטומטית כל 30 שניות
+          </div>
+        </div>
+
+        {/* STATS ROW */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:7, marginBottom:14 }}>
+          {[["כתבות",news.length,"#eee"],["Finviz",sources.finviz,"#00b4ff"],["Yahoo",sources.yahoo,"#a066ff"],["▲ Bull",bullCount,"#00c864"],["▼ Bear",bearCount,"#ff4444"]].map(([l,v,c])=>(
+            <div key={l} style={{ background:"rgba(255,255,255,0.03)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:8, padding:"8px 10px", textAlign:"center" }}>
+              <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color:c }}>{v}</div>
+              <div style={{ fontSize:9, color:"#333", letterSpacing:"0.1em", textTransform:"uppercase", marginTop:2 }}>{l}</div>
+            </div>
+          ))}
+        </div>
+        )}
+
+        {/* NEWS single */}
+        {viewMode==="single" && <>
+        {newsLoading && (
+          <div style={{ textAlign:"center", padding:"50px 0" }}>
+            <div style={{ width:28,height:28,borderRadius:"50%",border:"2px solid rgba(232,255,71,0.15)",borderTop:"2px solid #e8ff47",margin:"0 auto 16px",animation:"spin 0.8s linear infinite" }}/>
+            <div style={{ color:"#333", fontSize:12 }}>מושך חדשות מ-Finviz + Yahoo...</div>
+          </div>
+        )}
+        {newsError && (
+          <div style={{ background:"rgba(255,60,60,0.07)", border:"1px solid rgba(255,60,60,0.15)", borderRadius:10, padding:18 }}>
+            <div style={{ color:"#ff6666", fontSize:13, marginBottom:8 }}>{newsError}</div>
+            <button onClick={()=>fetchNews(ticker)} style={{ background:"transparent", border:"1px solid rgba(255,60,60,0.25)", borderRadius:7, padding:"7px 14px", color:"#ff6666", fontSize:12, cursor:"pointer" }}>נסה שנית</button>
+          </div>
+        )}
+        {!newsLoading && news.length > 0 && (
+          <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+            {news.map((item,i)=><NewsCard key={i} item={item} index={i}/>)}
+          </div>
+        )}
+
+        {!newsLoading && news.length > 0 && (
+          <button onClick={()=>fetchNews(ticker)} style={{ display:"flex", alignItems:"center", gap:7, background:"transparent", border:"1px solid rgba(255,255,255,0.07)", borderRadius:9, padding:"10px 18px", color:"#333", fontSize:12, cursor:"pointer", margin:"16px auto 0", transition:"color 0.15s,border-color 0.15s" }}
+            onMouseEnter={e=>{e.currentTarget.style.color="#e8ff47";e.currentTarget.style.borderColor="rgba(232,255,71,0.25)"}}
+            onMouseLeave={e=>{e.currentTarget.style.color="#333";e.currentTarget.style.borderColor="rgba(255,255,255,0.07)"}}>
+            ↻ רענן חדשות
+          </button>
+        )}
+        </>}
+
+        {/* NEWS FEED */}
+        {viewMode==="feed" && (
+          <div>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
+              <div>
+                <div style={{ fontSize:18, fontWeight:800, fontFamily:"monospace" }}>📡 פיד רשימת מעקב</div>
+                <div style={{ fontSize:11, color:"#444", marginTop:2 }}>{watchlist.join(" · ")}</div>
+              </div>
+              {feedUpdatedAt && (
+                <button onClick={()=>setLiveOn(!liveOn)} style={{ display:"flex", alignItems:"center", gap:5, background:"none", border:"none", cursor:"pointer", padding:0 }}>
+                  {liveOn ? (<>
+                    <span style={{ width:6, height:6, borderRadius:"50%", background:"#e8ff47", animation:"blink 1.2s infinite" }}/>
+                    <span style={{ fontSize:10, color:"#e8ff47", fontFamily:"monospace", fontWeight:700 }}>LIVE · {countdown}s</span>
+                  </>) : (<>
+                    <span style={{ width:6, height:6, borderRadius:"50%", background:"#444" }}/>
+                    <span style={{ fontSize:10, color:"#444", fontFamily:"monospace" }}>מושהה</span>
+                  </>)}
+                </button>
+              )}
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:7, marginBottom:14 }}>
+              {[["טיקרים",watchlist.length,"#eee"],["כתבות",feedNews.length,"#eee"],["Finviz",feedSources.finviz,"#00b4ff"],["Yahoo",feedSources.yahoo,"#a066ff"]].map(([l,v,c])=>(
+                <div key={l} style={{ background:"rgba(255,255,255,0.03)", border:"1px solid rgba(255,255,255,0.06)", borderRadius:8, padding:"8px 10px", textAlign:"center" }}>
+                  <div style={{ fontSize:17, fontWeight:800, fontFamily:"monospace", color:c }}>{v}</div>
+                  <div style={{ fontSize:9, color:"#333", letterSpacing:"0.1em", textTransform:"uppercase", marginTop:2 }}>{l}</div>
+                </div>
+              ))}
+            </div>
+
+            {feedLoading && (
+              <div style={{ textAlign:"center", padding:"50px 0" }}>
+                <div style={{ width:28,height:28,borderRadius:"50%",border:"2px solid rgba(232,255,71,0.15)",borderTop:"2px solid #e8ff47",margin:"0 auto 16px",animation:"spin 0.8s linear infinite" }}/>
+                <div style={{ color:"#333", fontSize:12 }}>מושך חדשות עבור {watchlist.length} מניות...</div>
+              </div>
+            )}
+            {feedError && (
+              <div style={{ background:"rgba(255,60,60,0.07)", border:"1px solid rgba(255,60,60,0.15)", borderRadius:10, padding:18 }}>
+                <div style={{ color:"#ff6666", fontSize:13, marginBottom:8 }}>{feedError}</div>
+                <button onClick={()=>fetchFeed(watchlist)} style={{ background:"transparent", border:"1px solid rgba(255,60,60,0.25)", borderRadius:7, padding:"7px 14px", color:"#ff6666", fontSize:12, cursor:"pointer" }}>נסה שנית</button>
+              </div>
+            )}
+            {!feedLoading && feedNews.length > 0 && (
+              <div style={{ display:"flex", flexDirection:"column", gap:7 }}>
+                {feedNews.map((item,i)=><NewsCard key={i} item={item} index={i} showTicker/>)}
+              </div>
+            )}
+            {!feedLoading && !feedError && feedNews.length === 0 && (
+              <div style={{ textAlign:"center", padding:"40px 0", color:"#2a2a2a", fontSize:12 }}>אין חדשות זמינות כרגע</div>
+            )}
+
+            {!feedLoading && feedNews.length > 0 && (
+              <button onClick={()=>fetchFeed(watchlist)} style={{ display:"flex", alignItems:"center", gap:7, background:"transparent", border:"1px solid rgba(255,255,255,0.07)", borderRadius:9, padding:"10px 18px", color:"#333", fontSize:12, cursor:"pointer", margin:"16px auto 0" }}
+                onMouseEnter={e=>{e.currentTarget.style.color="#e8ff47";e.currentTarget.style.borderColor="rgba(232,255,71,0.25)"}}
+                onMouseLeave={e=>{e.currentTarget.style.color="#333";e.currentTarget.style.borderColor="rgba(255,255,255,0.07)"}}>
+                ↻ רענן פיד
+              </button>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop:36, fontSize:10, color:"#1a1a1a", textAlign:"center", lineHeight:1.7 }}>
+          Finviz · Yahoo Finance · אין לראות בתוכן ייעוץ השקעות
+        </div>
+      </div>
+
+      {showAlerts && <AlertsPanel ticker={ticker} maPeriods={maPeriods} onClose={()=>{ setShowAlerts(false); fetch(`${PROXY}/alerts/config`).then(r=>r.json()).then(d=>setAlertsOk(d.configured)).catch(()=>{}); }}/>}
+      {showScreener && <BreakoutScreener watchlist={watchlist} onAddToWatchlist={addToWatchlist} onAddToJournal={addToJournal} onClose={()=>setShowScreener(false)}/>}
+      {showJournal && <JournalPanel onClose={()=>setShowJournal(false)}/>}
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+</script>
+
+<script>
+  // רישום Service Worker — נדרש כדי שהדפדפן יאפשר התקנה כ-PWA.
+  // אם הקובץ לא קיים (למשל בהרצה מקומית מהדיסק) זה פשוט נכשל בשקט.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+    });
+  }
+</script>
+
+</body>
+</html>
